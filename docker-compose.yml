@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  brdresort:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: brdresort:latest
+    container_name: brdresort-app
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - SERVER_PORT=8080
+      - REDIS_HOST=${REDIS_HOST:-localhost}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - AZURE_BLOB_REPORTS_URL=${AZURE_BLOB_REPORTS_URL:-https://storageaccount.blob.core.windows.net/reports}
+      - AZURE_BLOB_BACKUP_URL=${AZURE_BLOB_BACKUP_URL:-https://storageaccount.blob.core.windows.net/backups}
+      - PAYMENT_API_URL=${PAYMENT_API_URL:-http://payment-service/payments/charge}
+      - JAVA_OPTS=-Xms256m -Xmx512m -XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0
+    volumes:
+      - ./config:/app/config:ro
+    networks:
+      - app-network
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge

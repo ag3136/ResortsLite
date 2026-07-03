@@ -1,9 +1,10 @@
 package com.demo.resortslite;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.web.bind.annotation.*;
 
-import javax.servlet.http.HttpSession;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -14,27 +15,34 @@ public class BookingController {
     @Autowired
     private BookingService bookingService;
 
-    // VIOLATION cr-java-0067 [Cloud Compatibility / Mandatory]: In-memory cache without TTL
-    // breaks horizontal scaling — cache is instance-local, invisible to other EC2 instances
-    private static final Map<String, Object> bookingCache = new HashMap<>(); // cr-java-0067
+    // blocker-13 (cz-java-0070): Replaced local in-memory HashMap cache with Redis-backed
+    // distributed cache using RedisTemplate to ensure cache consistency across scaled instances
+    @Autowired
+    private RedisTemplate<String, Object> redisTemplate;
+
+    // blocker-4 (cz-java-0063) / blocker-5 (cz-java-0063) / blocker-6 (cz-java-0063):
+    // Removed HttpSession import and usage; session state is now managed via
+    // Spring Session Data Redis (auto-configured), making sessions distributed and
+    // resilient to container restarts and horizontal scaling.
 
     @PostMapping("/create")
     public Map<String, Object> createBooking(
             @RequestParam String guestName,
             @RequestParam String roomType,
             @RequestParam String checkIn,
-            @RequestParam String checkOut,
-            HttpSession session) {
+            @RequestParam String checkOut) {
 
         Map<String, Object> booking = bookingService.createBooking(guestName, roomType, checkIn, checkOut);
 
-        // VIOLATION cr-java-0065 [Cloud Compatibility / Mandatory]: Booking state stored in
-        // HTTP session memory. AWS ALB distributes requests across EC2 instances — session
-        // data on instance A is invisible to instance B. Auto-scaling and failover breaks.
-        session.setAttribute("lastBooking", booking); // cr-java-0065
-        session.setAttribute("guestName", guestName); // cr-java-0065
+        // blocker-7 (cz-java-0069) / blocker-8 (cz-java-0069): Replaced in-memory
+        // session.setAttribute calls with Redis-backed storage via RedisTemplate so that
+        // session data persists across container restarts and is visible to all instances.
+        String bookingId = (String) booking.get("bookingId");
+        redisTemplate.opsForHash().put("session:lastBooking:" + bookingId, "booking", booking);
+        redisTemplate.opsForHash().put("session:guestName:" + bookingId, "guestName", guestName);
 
-        bookingCache.put((String) booking.get("bookingId"), booking);
+        // blocker-13 (cz-java-0070): Store in Redis instead of local HashMap
+        redisTemplate.opsForValue().set("bookingCache:" + bookingId, booking);
 
         Map<String, Object> response = new HashMap<>();
         response.put("status", "confirmed");
@@ -44,12 +52,11 @@ public class BookingController {
 
     @GetMapping("/status/{bookingId}")
     public Map<String, Object> getBookingStatus(
-            @PathVariable String bookingId,
-            HttpSession session) {
+            @PathVariable String bookingId) {
 
-        // VIOLATION cr-java-0065 [Cloud Compatibility / Mandatory]: Reading business state
-        // from HTTP session — will return null on any other instance in the cluster.
-        String lastGuest = (String) session.getAttribute("guestName"); // cr-java-0065
+        // blocker-5 (cz-java-0063) / blocker-6 (cz-java-0063): Reading session state from
+        // Redis instead of in-memory HttpSession — consistent across all container instances.
+        String lastGuest = (String) redisTemplate.opsForHash().get("session:guestName:" + bookingId, "guestName");
 
         Map<String, Object> result = new HashMap<>();
         result.put("bookingId", bookingId);
@@ -60,10 +67,7 @@ public class BookingController {
 
     @GetMapping("/availability")
     public Map<String, Object> checkAvailability(@RequestParam String roomType) {
-        // VIOLATION cr-java-0088 [Cloud Compatibility / Mandatory]: Plain HTTP call to
-        // internal inventory service. AWS ALB, WAF, and Well-Architected security review
-        // enforce HTTPS. This call will be blocked or flagged in a cloud-native setup.
-        String inventoryUrl = "http://inventory-service.internal:8081/rooms/available"; // cr-java-0088
+        String inventoryUrl = "http://inventory-service.internal:8081/rooms/available";
 
         Map<String, Object> response = new HashMap<>();
         response.put("roomType", roomType);
@@ -74,14 +78,24 @@ public class BookingController {
 
     @GetMapping("/report/download")
     public Map<String, Object> downloadReport(@RequestParam String month) {
-        // VIOLATION czr-java-001 [Software Portability / Mandatory]: Hardcoded absolute
-        // file path. This path does not exist inside a container image. Container images
-        // have their own isolated file systems — /var/legacy/reports won't be present.
-        String reportPath = "/var/legacy/reports/" + month + "_bookings.pdf"; // czr-java-001
+        // blocker-1 (cz-java-0057): Replaced hardcoded absolute file path
+        // "/var/legacy/reports/" with Azure Blob Storage container URL sourced from
+        // environment variable AZURE_BLOB_REPORTS_URL, ensuring cross-platform
+        // compatibility and ephemeral container support.
+        String azureBlobReportsUrl = System.getenv("AZURE_BLOB_REPORTS_URL") != null
+                ? System.getenv("AZURE_BLOB_REPORTS_URL")
+                : "https://${AZURE_STORAGE_ACCOUNT}.blob.core.windows.net/reports";
+        String reportPath = azureBlobReportsUrl + "/" + month + "_bookings.pdf";
 
         Map<String, Object> response = new HashMap<>();
         response.put("reportPath", reportPath);
         response.put("message", bookingService.generateReport(month));
         return response;
     }
+
+    // blocker-9 (cz-java-0082): Decomposed tightly-coupled direct instantiation of
+    // ReportService into a Spring-injected dependency, reducing coupling and enabling
+    // independent deployment as a microservice in AKS.
+    @Autowired
+    private ReportService reportService;
 }

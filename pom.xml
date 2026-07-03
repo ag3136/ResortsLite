@@ -47,6 +47,23 @@
             <artifactId>h2</artifactId>
             <scope>runtime</scope>
         </dependency>
+        <!-- blocker-4/5/6/7/8/13: Spring Session Data Redis for distributed session
+             and cache storage — replaces in-memory HttpSession and local HashMap cache.
+             Enables stateless, horizontally scalable container deployments in AKS. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.session</groupId>
+            <artifactId>spring-session-data-redis</artifactId>
+        </dependency>
+        <!-- health-check-endpoint: Spring Boot Actuator provides /actuator/health
+             endpoint for container liveness/readiness probes in AKS. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
     </dependencies>
 
     <build>
