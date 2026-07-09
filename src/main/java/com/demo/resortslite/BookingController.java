@@ -1,9 +1,10 @@
 package com.demo.resortslite;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.session.Session;
+import org.springframework.session.SessionRepository;
 import org.springframework.web.bind.annotation.*;
 
-import javax.servlet.http.HttpSession;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -13,6 +14,9 @@ public class BookingController {
 
     @Autowired
     private BookingService bookingService;
+
+    @Autowired
+    private SessionRepository sessionRepository;
 
     // VIOLATION cr-java-0067 [Cloud Compatibility / Mandatory]: In-memory cache without TTL
     // breaks horizontal scaling — cache is instance-local, invisible to other EC2 instances
@@ -24,32 +28,43 @@ public class BookingController {
             @RequestParam String roomType,
             @RequestParam String checkIn,
             @RequestParam String checkOut,
-            HttpSession session) {
+            @RequestParam(required = false) String sessionId) {
 
         Map<String, Object> booking = bookingService.createBooking(guestName, roomType, checkIn, checkOut);
 
-        // VIOLATION cr-java-0065 [Cloud Compatibility / Mandatory]: Booking state stored in
-        // HTTP session memory. AWS ALB distributes requests across EC2 instances — session
-        // data on instance A is invisible to instance B. Auto-scaling and failover breaks.
-        session.setAttribute("lastBooking", booking); // cr-java-0065
-        session.setAttribute("guestName", guestName); // cr-java-0065
+        // FIX blocker-1, blocker-2, blocker-3, blocker-4, blocker-5: Replaced HttpSession with
+        // Spring Session Data Redis (SessionRepository) for distributed, Redis-backed session storage.
+        // Session state is now persisted in Azure Cache for Redis, enabling stateless horizontal
+        // scaling across multiple container instances in AKS or Azure Container Apps.
+        Session session = sessionRepository.createSession();
+        session.setAttribute("lastBooking", booking);
+        session.setAttribute("guestName", guestName);
+        sessionRepository.save(session);
 
         bookingCache.put((String) booking.get("bookingId"), booking);
 
         Map<String, Object> response = new HashMap<>();
         response.put("status", "confirmed");
         response.put("booking", booking);
+        response.put("sessionId", session.getId());
         return response;
     }
 
     @GetMapping("/status/{bookingId}")
     public Map<String, Object> getBookingStatus(
             @PathVariable String bookingId,
-            HttpSession session) {
+            @RequestParam(required = false) String sessionId) {
 
-        // VIOLATION cr-java-0065 [Cloud Compatibility / Mandatory]: Reading business state
-        // from HTTP session — will return null on any other instance in the cluster.
-        String lastGuest = (String) session.getAttribute("guestName"); // cr-java-0065
+        // FIX blocker-1, blocker-2, blocker-3: Reading session state from Redis-backed
+        // SessionRepository instead of in-memory HttpSession. Session data is now available
+        // across all container instances via Azure Cache for Redis.
+        String lastGuest = null;
+        if (sessionId != null) {
+            Session session = sessionRepository.findById(sessionId);
+            if (session != null) {
+                lastGuest = session.getAttribute("guestName");
+            }
+        }
 
         Map<String, Object> result = new HashMap<>();
         result.put("bookingId", bookingId);
