@@ -4,6 +4,13 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
+import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRequest;
+import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueResponse;
+import software.amazon.awssdk.services.cognitoidp.CognitoIdentityProviderClient;
+import software.amazon.awssdk.services.cognitoidp.model.AdminGetUserRequest;
+import software.amazon.awssdk.services.cognitoidp.model.AdminGetUserResponse;
+
 import java.security.MessageDigest;
 import java.util.HashMap;
 import java.util.Map;
@@ -15,12 +22,18 @@ public class BookingService {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
-    // VIOLATION [Security Health / Critical]: Hardcoded database credentials in source code.
-    // If this repo is pushed to GitHub (even private), credentials are permanently exposed
-    // in git history. AWS Secrets Manager or Parameter Store must be used instead.
-    private static final String DB_HOST = "db-prod.resorts-internal.com"; // cr-java-0021
-    private static final String DB_USER = "admin";                         // sec-cred-001
-    private static final String DB_PASS = "Resort$Pass#2019!";             // sec-cred-001
+    // Fixed: Hardcoded database credentials replaced with AWS Secrets Manager
+    private String getSecret(String secretName) {
+        try (SecretsManagerClient client = SecretsManagerClient.create()) {
+            GetSecretValueRequest valueRequest = GetSecretValueRequest.builder()
+                    .secretId(secretName)
+                    .build();
+            GetSecretValueResponse valueResponse = client.getSecretValue(valueRequest);
+            return valueResponse.secretString();
+        } catch (Exception e) {
+            return System.getenv(secretName); // Fallback to env var
+        }
+    }
 
     // VIOLATION cr-java-0021 [Cloud Compatibility / Mandatory]: Hardcoded infrastructure
     // hostname. Cloud IP addresses and service endpoints change on restart, redeployment,
@@ -50,7 +63,7 @@ public class BookingService {
         booking.put("checkIn", checkIn);
         booking.put("checkOut", checkOut);
         booking.put("confirmationCode", confirmCode);
-        booking.put("dbHost", DB_HOST);
+        booking.put("dbHost", getSecret("DB_HOST"));
         return booking;
     }
 
