@@ -3,6 +3,9 @@ package com.demo.resortslite;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
+// Java 11 compatibility: javax.servlet-api 4.0.1 added as explicit dependency in pom.xml
+// javax.servlet was part of Java EE which was removed from the JDK in Java 9+ (module system change).
+// Spring Boot 2.7.x still uses javax.servlet (not jakarta.servlet), so javax.servlet-api 4.0.1 is correct.
 import javax.servlet.http.HttpSession;
 import java.util.HashMap;
 import java.util.Map;
