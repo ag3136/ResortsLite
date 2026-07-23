@@ -16,17 +16,16 @@
     <artifactId>resortsLite</artifactId>
     <version>1.0.0</version>
     <name>ResortsLite</name>
-    <description>Resort booking demo — Java 11 / Spring Boot 2.7.x</description>
+    <description>Resort booking demo - Java 11 / Spring Boot 2.7.x</description>
 
     <properties>
-        <!-- FIX issue-1 (critical / build-configuration):
-             Java version property updated from 1.8 to 11 for Java 11 compatibility.
+        <!-- Java version property updated to 11 for Java 11 compatibility.
              Spring Boot 2.7.x parent honours this property for source/target/release. -->
         <java.version>11</java.version>
     </properties>
 
     <dependencies>
-        <!-- Spring Boot starters — versions managed by parent BOM -->
+        <!-- Spring Boot starters - versions managed by parent BOM -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
@@ -36,32 +35,28 @@
             <artifactId>spring-boot-starter-jdbc</artifactId>
         </dependency>
 
-        <!-- FIX issue-6 (high / maven-dependencies):
-             log4j-core upgraded from 2.14.1 (CVE-2021-44228 Log4Shell RCE) to 2.17.2
-             which is the minimum safe version that patches all known Log4Shell variants. -->
+        <!-- log4j-core upgraded from 2.14.1 to 2.17.2 (patches CVE-2021-44228 Log4Shell RCE) -->
         <dependency>
             <groupId>org.apache.logging.log4j</groupId>
             <artifactId>log4j-core</artifactId>
             <version>2.17.2</version>
         </dependency>
 
-        <!-- FIX issue-6 (high / maven-dependencies):
-             commons-collections upgraded from 3.2.1 (CVE-2015-6420 Java deserialization RCE)
-             to 3.2.2 which patches the unsafe deserialization gadget chain. -->
+        <!-- commons-collections upgraded from 3.2.1 to 3.2.2 (patches CVE-2015-6420 deserialization RCE) -->
         <dependency>
             <groupId>commons-collections</groupId>
             <artifactId>commons-collections</artifactId>
             <version>3.2.2</version>
         </dependency>
 
-        <!-- H2 in-memory database for development/testing — version managed by parent -->
+        <!-- H2 in-memory database for development/testing - version managed by parent -->
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
             <scope>runtime</scope>
         </dependency>
 
-        <!-- Spring Boot test starter — version managed by parent -->
+        <!-- Spring Boot test starter - version managed by parent -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
@@ -71,10 +66,9 @@
 
     <build>
         <plugins>
-            <!-- FIX issue-2 (high / build-configuration):
-                 Explicit maven-compiler-plugin configuration added (was missing).
-                 Version bumped to 3.11.0 (supports --release flag for Java 9+).
-                 Using <release>11</release> is preferred over <source>/<target> because
+            <!-- Explicit maven-compiler-plugin configuration.
+                 Version 3.11.0 supports the release flag for Java 9+.
+                 Using release 11 is preferred over source/target because
                  it also sets the bootstrap classpath, preventing accidental use of
                  APIs removed in Java 11. -->
             <plugin>
@@ -88,10 +82,24 @@
                 </configuration>
             </plugin>
 
-            <!-- Spring Boot repackage plugin — version managed by parent -->
             <plugin>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-maven-plugin</artifactId>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>0.8.11</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
