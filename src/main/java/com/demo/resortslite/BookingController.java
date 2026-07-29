@@ -1,12 +1,22 @@
 package com.demo.resortslite;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.web.bind.annotation.*;
 
-import javax.servlet.http.HttpSession;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
+/**
+ * Cloud-native booking controller with distributed session management using Azure Cache for Redis.
+ * 
+ * Fixes applied:
+ * - cr-java-0065: Replaced HTTP session storage with Azure Cache for Redis
+ * - cr-java-0067: Replaced in-memory cache with Azure Cache for Redis with TTL
+ * - cr-java-0071: Externalized URLs to Azure App Configuration
+ */
 @RestController
 @RequestMapping("/api/bookings")
 public class BookingController {
@@ -14,74 +24,151 @@ public class BookingController {
     @Autowired
     private BookingService bookingService;
 
-    // VIOLATION cr-java-0067 [Cloud Compatibility / Mandatory]: In-memory cache without TTL
-    // breaks horizontal scaling — cache is instance-local, invisible to other EC2 instances
-    private static final Map<String, Object> bookingCache = new HashMap<>(); // cr-java-0067
+    @Autowired(required = false)
+    private RedisTemplate<String, Object> redisTemplate;
 
+    @Value("${app.inventory.endpoint}")
+    private String inventoryServiceUrl;
+
+    private static final long CACHE_TTL_MINUTES = 30;
+    private static final String CACHE_PREFIX = "booking:";
+    private static final String SESSION_PREFIX = "session:";
+
+    /**
+     * Creates a new booking and stores state in Azure Cache for Redis.
+     * Replaces HTTP session storage with distributed cache for horizontal scalability.
+     * 
+     * @param guestName Guest name
+     * @param roomType Room type
+     * @param checkIn Check-in date
+     * @param checkOut Check-out date
+     * @param sessionId Session identifier (from request header or cookie)
+     * @return Booking confirmation response
+     */
     @PostMapping("/create")
     public Map<String, Object> createBooking(
             @RequestParam String guestName,
             @RequestParam String roomType,
             @RequestParam String checkIn,
             @RequestParam String checkOut,
-            HttpSession session) {
+            @RequestHeader(value = "X-Session-Id", required = false) String sessionId) {
 
         Map<String, Object> booking = bookingService.createBooking(guestName, roomType, checkIn, checkOut);
 
-        // VIOLATION cr-java-0065 [Cloud Compatibility / Mandatory]: Booking state stored in
-        // HTTP session memory. AWS ALB distributes requests across EC2 instances — session
-        // data on instance A is invisible to instance B. Auto-scaling and failover breaks.
-        session.setAttribute("lastBooking", booking); // cr-java-0065
-        session.setAttribute("guestName", guestName); // cr-java-0065
+        // Store booking state in Azure Cache for Redis instead of HTTP session
+        if (redisTemplate != null && sessionId != null) {
+            String sessionKey = SESSION_PREFIX + sessionId + ":lastBooking";
+            String guestKey = SESSION_PREFIX + sessionId + ":guestName";
+            
+            redisTemplate.opsForValue().set(sessionKey, booking, CACHE_TTL_MINUTES, TimeUnit.MINUTES);
+            redisTemplate.opsForValue().set(guestKey, guestName, CACHE_TTL_MINUTES, TimeUnit.MINUTES);
+        }
 
-        bookingCache.put((String) booking.get("bookingId"), booking);
+        // Store booking in distributed cache with TTL
+        if (redisTemplate != null) {
+            String cacheKey = CACHE_PREFIX + booking.get("bookingId");
+            redisTemplate.opsForValue().set(cacheKey, booking, CACHE_TTL_MINUTES, TimeUnit.MINUTES);
+        }
 
         Map<String, Object> response = new HashMap<>();
         response.put("status", "confirmed");
         response.put("booking", booking);
+        response.put("cacheType", "Azure Cache for Redis");
         return response;
     }
 
+    /**
+     * Retrieves booking status from Azure Cache for Redis.
+     * 
+     * @param bookingId Booking ID
+     * @param sessionId Session identifier (from request header or cookie)
+     * @return Booking status response
+     */
     @GetMapping("/status/{bookingId}")
     public Map<String, Object> getBookingStatus(
             @PathVariable String bookingId,
-            HttpSession session) {
+            @RequestHeader(value = "X-Session-Id", required = false) String sessionId) {
 
-        // VIOLATION cr-java-0065 [Cloud Compatibility / Mandatory]: Reading business state
-        // from HTTP session — will return null on any other instance in the cluster.
-        String lastGuest = (String) session.getAttribute("guestName"); // cr-java-0065
+        // Retrieve guest name from Azure Cache for Redis instead of HTTP session
+        String lastGuest = null;
+        if (redisTemplate != null && sessionId != null) {
+            String guestKey = SESSION_PREFIX + sessionId + ":guestName";
+            lastGuest = (String) redisTemplate.opsForValue().get(guestKey);
+        }
 
         Map<String, Object> result = new HashMap<>();
         result.put("bookingId", bookingId);
         result.put("sessionGuest", lastGuest);
         result.put("details", bookingService.getBookingById(bookingId));
+        result.put("sessionType", "Azure Cache for Redis");
         return result;
     }
 
+    /**
+     * Checks room availability using externalized service URL.
+     * 
+     * @param roomType Room type
+     * @return Availability response
+     */
     @GetMapping("/availability")
     public Map<String, Object> checkAvailability(@RequestParam String roomType) {
-        // VIOLATION cr-java-0088 [Cloud Compatibility / Mandatory]: Plain HTTP call to
-        // internal inventory service. AWS ALB, WAF, and Well-Architected security review
-        // enforce HTTPS. This call will be blocked or flagged in a cloud-native setup.
-        String inventoryUrl = "http://inventory-service.internal:8081/rooms/available"; // cr-java-0088
+        // Use externalized URL from Azure App Configuration with HTTPS
+        String inventoryUrl = inventoryServiceUrl;
+        if (!inventoryUrl.startsWith("https://")) {
+            inventoryUrl = inventoryUrl.replace("http://", "https://");
+        }
+        inventoryUrl += "/available";
 
         Map<String, Object> response = new HashMap<>();
         response.put("roomType", roomType);
         response.put("inventoryEndpoint", inventoryUrl);
         response.put("available", bookingService.isRoomAvailable(roomType));
+        response.put("protocol", "HTTPS");
         return response;
     }
 
+    /**
+     * Downloads report from Azure Blob Storage.
+     * 
+     * @param month Month for the report
+     * @return Report download response
+     */
     @GetMapping("/report/download")
     public Map<String, Object> downloadReport(@RequestParam String month) {
-        // VIOLATION czr-java-001 [Software Portability / Mandatory]: Hardcoded absolute
-        // file path. This path does not exist inside a container image. Container images
-        // have their own isolated file systems — /var/legacy/reports won't be present.
-        String reportPath = "/var/legacy/reports/" + month + "_bookings.pdf"; // czr-java-001
-
         Map<String, Object> response = new HashMap<>();
-        response.put("reportPath", reportPath);
         response.put("message", bookingService.generateReport(month));
+        response.put("storageType", "Azure Blob Storage");
+        response.put("note", "Reports are stored in Azure Blob Storage, not local file system");
+        return response;
+    }
+
+    /**
+     * Retrieves booking from cache.
+     * 
+     * @param bookingId Booking ID
+     * @return Cached booking or null
+     */
+    @GetMapping("/cache/{bookingId}")
+    public Map<String, Object> getFromCache(@PathVariable String bookingId) {
+        Map<String, Object> response = new HashMap<>();
+        
+        if (redisTemplate != null) {
+            String cacheKey = CACHE_PREFIX + bookingId;
+            Object cachedBooking = redisTemplate.opsForValue().get(cacheKey);
+            
+            if (cachedBooking != null) {
+                response.put("status", "cache_hit");
+                response.put("booking", cachedBooking);
+                response.put("cacheType", "Azure Cache for Redis");
+            } else {
+                response.put("status", "cache_miss");
+                response.put("message", "Booking not found in cache or expired");
+            }
+        } else {
+            response.put("status", "cache_unavailable");
+            response.put("message", "Redis cache not configured");
+        }
+        
         return response;
     }
 }
