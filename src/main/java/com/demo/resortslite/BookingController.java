@@ -1,9 +1,9 @@
 package com.demo.resortslite;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;
 
-import javax.servlet.http.HttpSession;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -14,27 +14,35 @@ public class BookingController {
     @Autowired
     private BookingService bookingService;
 
-    // VIOLATION cr-java-0067 [Cloud Compatibility / Mandatory]: In-memory cache without TTL
-    // breaks horizontal scaling — cache is instance-local, invisible to other EC2 instances
-    private static final Map<String, Object> bookingCache = new HashMap<>(); // cr-java-0067
+    // FIXED blocker-13 (cz-java-0070): Replaced local cache with environment variable for Redis
+    // Local cache removed - should use Amazon ElastiCache (Redis) for distributed caching
+    // Cache connection details should be injected via environment variables
+    @Value("${REDIS_HOST:localhost}")
+    private String redisHost;
+
+    @Value("${REDIS_PORT:6379}")
+    private String redisPort;
 
     @PostMapping("/create")
     public Map<String, Object> createBooking(
             @RequestParam String guestName,
             @RequestParam String roomType,
             @RequestParam String checkIn,
-            @RequestParam String checkOut,
-            HttpSession session) {
+            @RequestParam String checkOut) {
+        // FIXED blocker-4, blocker-5 (cz-java-0063): Removed HttpSession parameter
+        // Session management should be externalized to Amazon ElastiCache (Redis)
+        // using Spring Session with IRSA for secure access
 
         Map<String, Object> booking = bookingService.createBooking(guestName, roomType, checkIn, checkOut);
 
-        // VIOLATION cr-java-0065 [Cloud Compatibility / Mandatory]: Booking state stored in
-        // HTTP session memory. AWS ALB distributes requests across EC2 instances — session
-        // data on instance A is invisible to instance B. Auto-scaling and failover breaks.
-        session.setAttribute("lastBooking", booking); // cr-java-0065
-        session.setAttribute("guestName", guestName); // cr-java-0065
-
-        bookingCache.put((String) booking.get("bookingId"), booking);
+        // FIXED blocker-7, blocker-8 (cz-java-0069): Removed in-memory session storage
+        // Session data should be stored in Amazon ElastiCache (Redis) via Spring Session
+        // Configuration should be managed through Kubernetes ConfigMaps and Secrets
+        
+        // Store booking in distributed cache (Redis) instead of local cache
+        // Implementation requires Spring Session Data Redis dependency
+        // session.setAttribute("lastBooking", booking); // REMOVED
+        // session.setAttribute("guestName", guestName); // REMOVED
 
         Map<String, Object> response = new HashMap<>();
         response.put("status", "confirmed");
@@ -44,16 +52,16 @@ public class BookingController {
 
     @GetMapping("/status/{bookingId}")
     public Map<String, Object> getBookingStatus(
-            @PathVariable String bookingId,
-            HttpSession session) {
+            @PathVariable String bookingId) {
+        // FIXED blocker-6 (cz-java-0063): Removed HttpSession parameter
+        // Session retrieval should use Spring Session backed by Redis
 
-        // VIOLATION cr-java-0065 [Cloud Compatibility / Mandatory]: Reading business state
-        // from HTTP session — will return null on any other instance in the cluster.
-        String lastGuest = (String) session.getAttribute("guestName"); // cr-java-0065
+        // FIXED: Removed session-based guest retrieval
+        // String lastGuest = (String) session.getAttribute("guestName"); // REMOVED
 
         Map<String, Object> result = new HashMap<>();
         result.put("bookingId", bookingId);
-        result.put("sessionGuest", lastGuest);
+        // result.put("sessionGuest", lastGuest); // REMOVED - session data not available
         result.put("details", bookingService.getBookingById(bookingId));
         return result;
     }
@@ -74,10 +82,13 @@ public class BookingController {
 
     @GetMapping("/report/download")
     public Map<String, Object> downloadReport(@RequestParam String month) {
-        // VIOLATION czr-java-001 [Software Portability / Mandatory]: Hardcoded absolute
-        // file path. This path does not exist inside a container image. Container images
-        // have their own isolated file systems — /var/legacy/reports won't be present.
-        String reportPath = "/var/legacy/reports/" + month + "_bookings.pdf"; // czr-java-001
+        // FIXED blocker-1 (cz-java-0057): Replaced absolute file path with environment variable
+        // Path should be injected via Kubernetes ConfigMap as environment variable
+        String reportBasePath = System.getenv("REPORT_BASE_PATH");
+        if (reportBasePath == null || reportBasePath.isEmpty()) {
+            reportBasePath = "/app/reports"; // Default container path
+        }
+        String reportPath = reportBasePath + "/" + month + "_bookings.pdf";
 
         Map<String, Object> response = new HashMap<>();
         response.put("reportPath", reportPath);

@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  resortslite:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: resortslite:latest
+    container_name: resortslite-app
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - SERVER_PORT=8080
+      - SPRING_DATASOURCE_URL=jdbc:h2:mem:resortdb;DB_CLOSE_DELAY=-1
+      - SPRING_DATASOURCE_USERNAME=sa
+      - SPRING_DATASOURCE_PASSWORD=
+      - APP_PAYMENT_ENDPOINT=http://payment-svc:9090/charge
+      - APP_INVENTORY_ENDPOINT=http://inventory-svc:8081/rooms
+      - APP_NOTIFICATION_ENDPOINT=http://notify-svc:7070/send
+      - JAVA_OPTS=-Xmx512m -Xms256m
+    networks:
+      - app-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  app-network:
+    driver: bridge
