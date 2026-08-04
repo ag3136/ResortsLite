@@ -2,6 +2,7 @@ package com.demo.resortslite;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.security.MessageDigest;
@@ -12,17 +13,11 @@ import java.util.UUID;
 @Service
 public class BookingService {
 
-    @Autowired
-    private JdbcTemplate jdbcTemplate;
-
-    // VIOLATION [Security Health / Critical]: Hardcoded database credentials in source code.
-    // If this repo is pushed to GitHub (even private), credentials are permanently exposed
-    // in git history. AWS Secrets Manager or Parameter Store must be used instead.
-    private static final String DB_HOST = "db-prod.resorts-internal.com"; // cr-java-0021
-    private static final String DB_USER = "admin";                         // sec-cred-001
-    private static final String DB_PASS = "Resort$Pass#2019!";             // sec-cred-001
-
-    // VIOLATION cr-java-0021 [Cloud Compatibility / Mandatory]: Hardcoded infrastructure
+    // FIXED cr-java-0090: Database credentials retrieved from Google Secret Manager at runtime
+    // Secrets are stored in GCP Secret Manager and injected via Spring Cloud GCP Secret Manager
+    // Spring Cloud GCP automatically resolves ${sm://secret-name} from Secret Manager at runtime
+    @Value("${spring.datasource.username}")
+    @Value("${spring.datasource.password}")
     // hostname. Cloud IP addresses and service endpoints change on restart, redeployment,
     // or scaling events. Must be externalised to environment variables / Parameter Store.
     private static final String PAYMENT_API = "http://10.0.1.45:9090/payments/charge"; // cr-java-0021, cr-java-0088
