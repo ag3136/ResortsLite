@@ -1,0 +1,72 @@
+# Docker ignore file for Java Maven projects
+# Exclude unnecessary files from Docker build context
+
+# Maven build artifacts
+target/
+!target/*.jar
+
+# Maven wrapper (use system Maven instead)
+mvnw
+mvnw.cmd
+.mvn/
+
+# Gradle wrapper (if present)
+gradlew
+gradlew.bat
+gradle/wrapper/
+
+# IDE files
+.idea/
+.vscode/
+.eclipse/
+.settings/
+*.iml
+*.ipr
+*.iws
+.classpath
+.project
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Git files
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+docs/
+README*
+LICENSE*
+
+# Test files
+src/test/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Docker files
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+Jenkinsfile
+azure-pipelines.yml
+
+# Environment files
+.env
+.env.*
