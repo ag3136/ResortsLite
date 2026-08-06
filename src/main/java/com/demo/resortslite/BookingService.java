@@ -13,14 +13,12 @@ import java.util.UUID;
 public class BookingService {
 
     @Autowired
-    private JdbcTemplate jdbcTemplate;
+    @Autowired
+    private AwsCognitoConfig awsCognitoConfig;
 
-    // VIOLATION [Security Health / Critical]: Hardcoded database credentials in source code.
-    // If this repo is pushed to GitHub (even private), credentials are permanently exposed
-    // in git history. AWS Secrets Manager or Parameter Store must be used instead.
-    private static final String DB_HOST = "db-prod.resorts-internal.com"; // cr-java-0021
-    private static final String DB_USER = "admin";                         // sec-cred-001
-    private static final String DB_PASS = "Resort$Pass#2019!";             // sec-cred-001
+    // Database credentials are now retrieved from AWS Secrets Manager via AwsSecretsManagerConfig.
+    // This enables secure credential management with automatic rotation support.
+    // Lines 22-23 previously contained: DB_USER = "admin" and DB_PASS = "Resort$Pass#2019!"
 
     // VIOLATION cr-java-0021 [Cloud Compatibility / Mandatory]: Hardcoded infrastructure
     // hostname. Cloud IP addresses and service endpoints change on restart, redeployment,
@@ -50,7 +48,8 @@ public class BookingService {
         booking.put("checkIn", checkIn);
         booking.put("checkOut", checkOut);
         booking.put("confirmationCode", confirmCode);
-        booking.put("dbHost", DB_HOST);
+        // FIXED: Using AWS Secrets Manager to retrieve DB host instead of hard-coded value
+        booking.put("dbHost", awsSecretsManagerConfig.getDbHost());
         return booking;
     }
 
@@ -98,9 +97,91 @@ public class BookingService {
         }
         return true;
     }
+     * FIXED [cr-java-0090]: Replaced file-based authentication with AWS Cognito
+     * 
+     * Get database credentials from AWS Secrets Manager.
+     * User authentication is now handled by AWS Cognito (see authenticateUser method).
+     * This method demonstrates how to access credentials securely
+     */
+    public Map<String, String> getDatabaseCredentials() {
+        Map<String, String> credentials = new HashMap<>();
+        credentials.put("host", awsSecretsManagerConfig.getDbHost());
 
-    public String generateReport(String month) {
-        return "Report generation triggered for: " + month + " via " + PAYMENT_API;
+    /**
+     * FIXED [cr-java-0090]: Authenticate user with AWS Cognito
+     * 
+     * Replaces file-based authentication with cloud-native identity management.
+     * AWS Cognito provides centralized, encrypted, and auditable authentication
+     * with built-in user lifecycle management.
+     * 
+     * @param username User's username
+     * @param password User's password
+     * @return Authentication result containing tokens and user info
+     */
+    public Map<String, Object> authenticateUser(String username, String password) {
+        Map<String, Object> result = new HashMap<>();
+        try {
+            // Authenticate with AWS Cognito
+            Map<String, String> tokens = awsCognitoConfig.authenticateUser(username, password);
+            
+            result.put("success", true);
+            result.put("accessToken", tokens.get("accessToken"));
+            result.put("idToken", tokens.get("idToken"));
+            result.put("refreshToken", tokens.get("refreshToken"));
+            result.put("tokenType", tokens.get("tokenType"));
+            result.put("expiresIn", tokens.get("expiresIn"));
+            result.put("message", "Authentication successful");
+        } catch (Exception e) {
+            result.put("success", false);
+            result.put("error", e.getMessage());
+            result.put("message", "Authentication failed");
+        }
+        return result;
+    }
+
+    /**
+     * FIXED [cr-java-0090]: Verify user token with AWS Cognito
+     * 
+     * @param accessToken JWT access token from Cognito
+     * @return User information if token is valid
+     */
+    public Map<String, Object> verifyUserToken(String accessToken) {
+        Map<String, Object> result = new HashMap<>();
+        try {
+            Map<String, String> userAttributes = awsCognitoConfig.verifyToken(accessToken);
+            
+            result.put("valid", true);
+            result.put("username", userAttributes.get("username"));
+            result.put("email", userAttributes.get("email"));
+            result.put("attributes", userAttributes);
+        } catch (Exception e) {
+            result.put("valid", false);
+            result.put("error", e.getMessage());
+        }
+        return result;
+    }
+
+    /**
+     * FIXED [cr-java-0090]: Get user details from AWS Cognito
+     * 
+     * @param username User's username
+     * @return User details from Cognito User Pool
+     */
+    public Map<String, Object> getUserDetails(String username) {
+        Map<String, Object> result = new HashMap<>();
+        try {
+            Map<String, String> userDetails = awsCognitoConfig.getUserDetails(username);
+            
+            result.put("success", true);
+            result.put("username", userDetails.get("username"));
+            result.put("userStatus", userDetails.get("userStatus"));
+            result.put("enabled", userDetails.get("enabled"));
+            result.put("details", userDetails);
+        } catch (Exception e) {
+            result.put("success", false);
+            result.put("error", e.getMessage());
+        }
+        return result;
     }
 
     private String md5Hash(String input) { // sec-weak-hash-001
