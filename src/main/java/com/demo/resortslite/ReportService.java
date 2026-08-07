@@ -1,11 +1,22 @@
 package com.demo.resortslite;
 
+import com.azure.core.util.BinaryData;
+import com.azure.identity.DefaultAzureCredentialBuilder;
+import com.azure.messaging.servicebus.ServiceBusClientBuilder;
+import com.azure.messaging.servicebus.ServiceBusMessage;
+import com.azure.storage.blob.BlobContainerClient;
+import com.azure.storage.blob.BlobServiceClient;
+import com.azure.storage.blob.BlobServiceClientBuilder;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
-import java.io.File;
-import java.io.FileWriter;
-import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
@@ -13,43 +24,56 @@ import java.util.Map;
 @Service
 public class ReportService {
 
-    // VIOLATION czr-java-001 [Software Portability / Mandatory]: Hardcoded absolute path.
-    // /var/legacy/reports does not exist in a Docker container image. Breaks containerisation.
-    // Must use volume mounts, cloud object storage (S3 / Azure Blob), or environment variable.
-    private static final String REPORT_BASE_PATH = "/var/legacy/reports/"; // czr-java-001
+    private final String reportContainerName;
+    private final String backupContainerName;
+    private final String reportDownloadBaseUrl;
+    private final String configuredServerPort;
+    private final String storageConnectionString;
+    private final String storageEndpoint;
+    private final String serviceBusConnectionString;
+    private final String serviceBusQueueName;
+    private final String serviceBusTopicName;
+    private final boolean useTopic;
+    private final Clock clock;
 
-    // VIOLATION czr-java-001 [Software Portability / Mandatory]: Windows-style absolute path
-    // will fail on any Linux-based container or cloud host. Hard dependency on OS path structure.
-    private static final String BACKUP_PATH = "C:\\ResortBackups\\nightly\\"; // czr-java-001
-
-    // VIOLATION [Software Portability / High]: Fixed server port hardcoded in application logic.
-    // Container orchestration (ECS / EKS) dynamically assigns ports. Hardcoded ports prevent
-    // dynamic port binding required for modern container deployment and service discovery.
-    private static final int SERVER_PORT = 8080; // czr-port-001
+    public ReportService(
+            @Value("${app.report.container-name}") String reportContainerName,
+            @Value("${app.report.backup-container-name}") String backupContainerName,
+            @Value("${app.report.download-base-url}") String reportDownloadBaseUrl,
+            @Value("${app.report.server-port}") String configuredServerPort,
+            @Value("${app.report.storage.connection-string:}") String storageConnectionString,
+            @Value("${app.report.storage.endpoint:}") String storageEndpoint,
+            @Value("${app.report.schedule.connection-string:}") String serviceBusConnectionString,
+            @Value("${app.report.schedule.queue-name}") String serviceBusQueueName,
+            @Value("${app.report.schedule.topic-name}") String serviceBusTopicName,
+            @Value("${app.report.schedule.use-topic:false}") boolean useTopic) {
+        this.reportContainerName = reportContainerName;
+        this.backupContainerName = backupContainerName;
+        this.reportDownloadBaseUrl = reportDownloadBaseUrl;
+        this.configuredServerPort = configuredServerPort;
+        this.storageConnectionString = storageConnectionString;
+        this.storageEndpoint = storageEndpoint;
+        this.serviceBusConnectionString = serviceBusConnectionString;
+        this.serviceBusQueueName = serviceBusQueueName;
+        this.serviceBusTopicName = serviceBusTopicName;
+        this.useTopic = useTopic;
+        this.clock = Clock.systemUTC();
+    }
 
     public Map<String, Object> generateMonthlyReport(String month, String year) {
         String fileName = "resort_report_" + month + "_" + year + ".csv";
-        String fullPath = REPORT_BASE_PATH + fileName; // czr-java-001
-
+        String reportContent = buildReportContent();
         Map<String, Object> result = new HashMap<>();
 
         try {
-            File reportDir = new File(REPORT_BASE_PATH); // czr-java-001
-            if (!reportDir.exists()) {
-                reportDir.mkdirs();
-            }
-
-            FileWriter writer = new FileWriter(fullPath);
-            writer.write("BookingID,GuestName,RoomType,CheckIn,CheckOut,Amount\n");
-            writer.write("BK-001,John Smith,SUITE,2024-03-01,2024-03-05,1750.00\n");
-            writer.write("BK-002,Jane Doe,DELUXE,2024-03-03,2024-03-07,960.00\n");
-            writer.close();
+            BlobContainerClient reportContainer = getBlobContainerClient(reportContainerName);
+            reportContainer.getBlobClient(fileName)
+                    .upload(BinaryData.fromString(reportContent), true);
 
             result.put("status", "generated");
-            result.put("path", fullPath);
-            result.put("serverPort", SERVER_PORT); // czr-port-001
-
-        } catch (IOException e) {
+            result.put("path", reportContainer.getBlobClient(fileName).getBlobUrl());
+            result.put("serverPort", configuredServerPort);
+        } catch (Exception e) {
             result.put("status", "error");
             result.put("message", e.getMessage());
         }
@@ -57,22 +81,82 @@ public class ReportService {
         return result;
     }
 
-    // VIOLATION [Code Sustainability / Medium]: No JavaDoc or method documentation.
-    // Missing documentation is flagged across all public methods in the codebase.
-    // This increases onboarding time and transformation risk for automated tools.
-    public String buildReportDownloadUrl(String reportName) { // doc-missing-001
-        // VIOLATION cr-java-0088 [Cloud Compatibility / Mandatory]: Plain HTTP URL
-        // hardcoded for report download. Cloud security standards enforce HTTPS.
-        return "http://reports.resorts-internal.com:8080/download/" + reportName; // cr-java-0088
+    public String buildReportDownloadUrl(String reportName) {
+        return reportDownloadBaseUrl + "/" + reportName;
     }
 
-    public Map<String, Object> getSystemInfo() { // doc-missing-001
-        String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date());
+    public Map<String, Object> getSystemInfo() {
+        String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(Date.from(clock.instant()));
         Map<String, Object> info = new HashMap<>();
-        info.put("reportPath", REPORT_BASE_PATH);  // czr-java-001
-        info.put("backupPath", BACKUP_PATH);        // czr-java-001
-        info.put("serverPort", SERVER_PORT);        // czr-port-001
+        info.put("reportContainer", reportContainerName);
+        info.put("backupContainer", backupContainerName);
+        info.put("serverPort", configuredServerPort);
         info.put("generatedAt", timestamp);
         return info;
+    }
+
+    public Map<String, Object> scheduleReportGeneration(String reportName, Duration delay) {
+        Map<String, Object> response = new HashMap<>();
+        if (!StringUtils.hasText(serviceBusConnectionString)) {
+            response.put("status", "skipped");
+            response.put("message", "Azure Service Bus connection string is not configured");
+            return response;
+        }
+
+        OffsetDateTime scheduledTime = OffsetDateTime.now(clock).plus(delay).withOffsetSameInstant(ZoneOffset.UTC);
+        ServiceBusMessage message = new ServiceBusMessage(reportName.getBytes(StandardCharsets.UTF_8));
+        message.setScheduledEnqueueTime(scheduledTime);
+
+        try {
+            if (useTopic) {
+                new ServiceBusClientBuilder()
+                        .connectionString(serviceBusConnectionString)
+                        .sender()
+                        .topicName(serviceBusTopicName)
+                        .buildClient()
+                        .scheduleMessage(message, scheduledTime);
+            } else {
+                new ServiceBusClientBuilder()
+                        .connectionString(serviceBusConnectionString)
+                        .sender()
+                        .queueName(serviceBusQueueName)
+                        .buildClient()
+                        .scheduleMessage(message, scheduledTime);
+            }
+            response.put("status", "scheduled");
+            response.put("scheduledFor", scheduledTime.toString());
+        } catch (Exception ex) {
+            response.put("status", "error");
+            response.put("message", ex.getMessage());
+        }
+        return response;
+    }
+
+    private String buildReportContent() {
+        return "BookingID,GuestName,RoomType,CheckIn,CheckOut,Amount\n"
+                + "BK-001,John Smith,SUITE,2024-03-01,2024-03-05,1750.00\n"
+                + "BK-002,Jane Doe,DELUXE,2024-03-03,2024-03-07,960.00\n";
+    }
+
+    private BlobContainerClient getBlobContainerClient(String containerName) {
+        BlobServiceClient blobServiceClient = buildBlobServiceClient();
+        BlobContainerClient containerClient = blobServiceClient.getBlobContainerClient(containerName);
+        if (!containerClient.exists()) {
+            containerClient.create();
+        }
+        return containerClient;
+    }
+
+    private BlobServiceClient buildBlobServiceClient() {
+        BlobServiceClientBuilder builder = new BlobServiceClientBuilder();
+        if (StringUtils.hasText(storageConnectionString)) {
+            builder.connectionString(storageConnectionString);
+        } else if (StringUtils.hasText(storageEndpoint)) {
+            builder.endpoint(storageEndpoint)
+                    .credential(new DefaultAzureCredentialBuilder().build());
+        } else {
+            throw new IllegalStateException("Azure Blob Storage configuration is missing");
+        }
+        return builder.buildClient();
     }
 }
