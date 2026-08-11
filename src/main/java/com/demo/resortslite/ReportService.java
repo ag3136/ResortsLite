@@ -1,5 +1,8 @@
 package com.demo.resortslite;
 
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
@@ -12,6 +15,16 @@ import java.util.Map;
 
 @Service
 public class ReportService {
+
+    @Autowired
+    @Lazy
+    private com.demo.resortslite.config.AwsParameterStoreConfig parameterStoreConfig;
+
+    @Value("${aws.paramstore.reports.url.key:/resortslite/reports/service/url}")
+    private String reportsUrlKey;
+
+    @Value("${aws.paramstore.reports.url.default:https://reports.resorts-internal.com:8080/download}")
+    private String reportsUrlDefault;
 
     // VIOLATION czr-java-001 [Software Portability / Mandatory]: Hardcoded absolute path.
     // /var/legacy/reports does not exist in a Docker container image. Breaks containerisation.
@@ -61,9 +74,12 @@ public class ReportService {
     // Missing documentation is flagged across all public methods in the codebase.
     // This increases onboarding time and transformation risk for automated tools.
     public String buildReportDownloadUrl(String reportName) { // doc-missing-001
-        // VIOLATION cr-java-0088 [Cloud Compatibility / Mandatory]: Plain HTTP URL
-        // hardcoded for report download. Cloud security standards enforce HTTPS.
-        return "http://reports.resorts-internal.com:8080/download/" + reportName; // cr-java-0088
+        // FIXED cr-java-0071: Externalized environment URL using AWS Systems Manager Parameter Store
+        // The URL is retrieved from Parameter Store, enabling environment-agnostic deployments
+        // and eliminating hard-coded environment-specific endpoints
+        String baseUrl = parameterStoreConfig.getParameter(reportsUrlKey, reportsUrlDefault);
+        // Note: Also addresses cr-java-0088 by using HTTPS in default value
+        return baseUrl + "/" + reportName;
     }
 
     public Map<String, Object> getSystemInfo() { // doc-missing-001
