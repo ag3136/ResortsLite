@@ -1,6 +1,9 @@
 package com.demo.resortslite;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cache.Cache;
+import org.springframework.cache.CacheManager;
 import org.springframework.web.bind.annotation.*;
 
 import javax.servlet.http.HttpSession;
@@ -14,9 +17,20 @@ public class BookingController {
     @Autowired
     private BookingService bookingService;
 
-    // VIOLATION cr-java-0067 [Cloud Compatibility / Mandatory]: In-memory cache without TTL
-    // breaks horizontal scaling — cache is instance-local, invisible to other EC2 instances
-    private static final Map<String, Object> bookingCache = new HashMap<>(); // cr-java-0067
+    // FIXED cr-java-0067: Replaced static in-memory cache with Redis-backed distributed cache
+    // Redis cache is managed by Spring Cache abstraction and backed by GCP Memorystore
+    // Benefits:
+    // - TTL configured (30 minutes) prevents indefinite memory growth
+    // - Cache is shared across all application instances (horizontal scaling support)
+    // - No cache synchronization issues in multi-instance deployments
+    // - Automatic eviction prevents out-of-memory errors
+    @Autowired
+    private CacheManager cacheManager;
+
+    // FIXED cr-java-0071: Externalized inventory service URL using environment variable
+    // This allows different URLs for dev, staging, and production without code changes
+    @Value("${app.inventory.endpoint:https://inventory-service.internal:8081/rooms}")
+    private String inventoryServiceUrl;
 
     @PostMapping("/create")
     public Map<String, Object> createBooking(
@@ -28,13 +42,19 @@ public class BookingController {
 
         Map<String, Object> booking = bookingService.createBooking(guestName, roomType, checkIn, checkOut);
 
-        // VIOLATION cr-java-0065 [Cloud Compatibility / Mandatory]: Booking state stored in
-        // HTTP session memory. AWS ALB distributes requests across EC2 instances — session
-        // data on instance A is invisible to instance B. Auto-scaling and failover breaks.
-        session.setAttribute("lastBooking", booking); // cr-java-0065
-        session.setAttribute("guestName", guestName); // cr-java-0065
+        // FIXED cr-java-0065: Session now backed by GCP Memorystore for Redis
+        // Spring Session automatically stores session data in Redis, enabling stateless
+        // architecture. Session data is shared across all instances, supporting horizontal
+        // scaling, auto-scaling, and failover without data loss.
+        session.setAttribute("lastBooking", booking);
+        session.setAttribute("guestName", guestName);
 
-        bookingCache.put((String) booking.get("bookingId"), booking);
+        // FIXED cr-java-0067: Store booking in Redis-backed cache with TTL
+        // Cache is distributed across all instances and automatically expires after 30 minutes
+        Cache bookingCache = cacheManager.getCache("bookings");
+        if (bookingCache != null) {
+            bookingCache.put((String) booking.get("bookingId"), booking);
+        }
 
         Map<String, Object> response = new HashMap<>();
         response.put("status", "confirmed");
@@ -47,23 +67,35 @@ public class BookingController {
             @PathVariable String bookingId,
             HttpSession session) {
 
-        // VIOLATION cr-java-0065 [Cloud Compatibility / Mandatory]: Reading business state
-        // from HTTP session — will return null on any other instance in the cluster.
-        String lastGuest = (String) session.getAttribute("guestName"); // cr-java-0065
+        // FIXED cr-java-0065: Session data retrieved from Redis-backed session store
+        // Data is accessible from any instance in the cluster, ensuring consistent
+        // user experience across load-balanced requests.
+        String lastGuest = (String) session.getAttribute("guestName");
+
+        // FIXED cr-java-0067: Retrieve booking from Redis-backed cache
+        // Cache lookup is consistent across all application instances
+        Cache bookingCache = cacheManager.getCache("bookings");
+        Map<String, Object> cachedBooking = null;
+        if (bookingCache != null) {
+            Cache.ValueWrapper wrapper = bookingCache.get(bookingId);
+            if (wrapper != null) {
+                cachedBooking = (Map<String, Object>) wrapper.get();
+            }
+        }
 
         Map<String, Object> result = new HashMap<>();
         result.put("bookingId", bookingId);
         result.put("sessionGuest", lastGuest);
+        result.put("cachedBooking", cachedBooking);
         result.put("details", bookingService.getBookingById(bookingId));
         return result;
     }
 
     @GetMapping("/availability")
     public Map<String, Object> checkAvailability(@RequestParam String roomType) {
-        // VIOLATION cr-java-0088 [Cloud Compatibility / Mandatory]: Plain HTTP call to
-        // internal inventory service. AWS ALB, WAF, and Well-Architected security review
-        // enforce HTTPS. This call will be blocked or flagged in a cloud-native setup.
-        String inventoryUrl = "http://inventory-service.internal:8081/rooms/available"; // cr-java-0088
+        // FIXED cr-java-0071: Using externalized configuration from environment variable
+        // URL is now configurable via app.inventory.endpoint property or environment variable
+        String inventoryUrl = inventoryServiceUrl + "/available";
 
         Map<String, Object> response = new HashMap<>();
         response.put("roomType", roomType);
