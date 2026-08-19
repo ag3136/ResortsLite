@@ -2,6 +2,7 @@ package com.demo.resortslite;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.security.MessageDigest;
@@ -22,10 +23,12 @@ public class BookingService {
     private static final String DB_USER = "admin";                         // sec-cred-001
     private static final String DB_PASS = "Resort$Pass#2019!";             // sec-cred-001
 
-    // VIOLATION cr-java-0021 [Cloud Compatibility / Mandatory]: Hardcoded infrastructure
-    // hostname. Cloud IP addresses and service endpoints change on restart, redeployment,
-    // or scaling events. Must be externalised to environment variables / Parameter Store.
-    private static final String PAYMENT_API = "http://10.0.1.45:9090/payments/charge"; // cr-java-0021, cr-java-0088
+    // FIXED cz-java-0062: Externalized hardcoded IP address to environment variable
+    // Use Kubernetes Service DNS name or ConfigMap for payment service endpoint
+    // This enables flexible deployment across different environments (dev/staging/prod)
+    // and supports Kubernetes service discovery without hardcoded IPs
+    @Value("${PAYMENT_SERVICE_URL:http://payment-service:9090/payments/charge}")
+    private String PAYMENT_API; // cr-java-0021, cr-java-0088
 
     public Map<String, Object> createBooking(String guestName, String roomType,
                                               String checkIn, String checkOut) {
@@ -99,9 +102,9 @@ public class BookingService {
         return true;
     }
 
-    public String generateReport(String month) {
-        return "Report generation triggered for: " + month + " via " + PAYMENT_API;
-    }
+    // REMOVED cz-java-0082: generateReport method removed from BookingService
+    // Report generation is now handled by dedicated ReportService for proper separation of concerns
+    // This enables independent deployment and scaling of booking and reporting microservices on EKS
 
     private String md5Hash(String input) { // sec-weak-hash-001
         try {
