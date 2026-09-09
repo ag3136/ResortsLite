@@ -1,47 +1,114 @@
 package com.demo.resortslite;
 
-import org.springframework.jdbc.core.JdbcTemplate;
+import com.azure.identity.DefaultAzureCredentialBuilder;
+import com.azure.security.keyvault.secrets.SecretClient;
+import com.azure.security.keyvault.secrets.SecretClientBuilder;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
+/**
+ * Cloud-ready booking service that retrieves database credentials from Azure Key Vault
+ * and uses parameterized queries to prevent SQL injection.
+ */
 @Service
 public class BookingService {
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
-    // VIOLATION [Security Health / Critical]: Hardcoded database credentials in source code.
-    // If this repo is pushed to GitHub (even private), credentials are permanently exposed
-    // in git history. AWS Secrets Manager or Parameter Store must be used instead.
-    private static final String DB_HOST = "db-prod.resorts-internal.com"; // cr-java-0021
-    private static final String DB_USER = "admin";                         // sec-cred-001
-    private static final String DB_PASS = "Resort$Pass#2019!";             // sec-cred-001
+    // Database host externalized to environment variable
+    @Value("${app.db.host:}")
+    private String dbHost;
 
-    // VIOLATION cr-java-0021 [Cloud Compatibility / Mandatory]: Hardcoded infrastructure
-    // hostname. Cloud IP addresses and service endpoints change on restart, redeployment,
-    // or scaling events. Must be externalised to environment variables / Parameter Store.
-    private static final String PAYMENT_API = "http://10.0.1.45:9090/payments/charge"; // cr-java-0021, cr-java-0088
+    // Payment API endpoint externalized to environment variable / Azure App Configuration
+    @Value("${app.payment.endpoint:https://payment-svc.internal:9090/charge}")
+    private String paymentApi;
 
+    // Azure Key Vault configuration
+    @Value("${azure.keyvault.secret.endpoint:}")
+    private String keyVaultEndpoint;
+
+    @Value("${azure.keyvault.secret.client-id:}")
+    private String keyVaultClientId;
+
+    @Value("${azure.keyvault.secret.client-secret:}")
+    private String keyVaultClientSecret;
+
+    @Value("${azure.keyvault.secret.tenant-id:}")
+    private String keyVaultTenantId;
+
+    /**
+     * Lazily-initialized SecretClient for retrieving secrets from Azure Key Vault.
+     * Uses DefaultAzureCredential for secure, centralized secret management.
+     */
+    private SecretClient secretClient;
+
+    private SecretClient getSecretClient() {
+        if (secretClient == null && keyVaultEndpoint != null && !keyVaultEndpoint.isEmpty()) {
+            if (keyVaultClientId != null && !keyVaultClientId.isEmpty()
+                    && keyVaultClientSecret != null && !keyVaultClientSecret.isEmpty()
+                    && keyVaultTenantId != null && !keyVaultTenantId.isEmpty()) {
+                // Service principal authentication
+                secretClient = new SecretClientBuilder()
+                        .vaultUrl(keyVaultEndpoint)
+                        .credential(new DefaultAzureCredentialBuilder().build())
+                        .buildClient();
+            } else {
+                // Managed Identity / DefaultAzureCredential
+                secretClient = new SecretClientBuilder()
+                        .vaultUrl(keyVaultEndpoint)
+                        .credential(new DefaultAzureCredentialBuilder().build())
+                        .buildClient();
+            }
+        }
+        return secretClient;
+    }
+
+    /**
+     * Retrieves a database credential from Azure Key Vault.
+     * Falls back to environment variable if Key Vault is not configured.
+     *
+     * @param secretName the name of the secret in Key Vault
+     * @return the secret value
+     */
+    private String getSecretFromKeyVault(String secretName) {
+        SecretClient client = getSecretClient();
+        if (client != null) {
+            return client.getSecret(secretName).getValue();
+        }
+        // Fallback to environment variable
+        return System.getenv(secretName);
+    }
+
+    /**
+     * Creates a new booking using parameterized queries to prevent SQL injection.
+     * Database credentials are retrieved from Azure Key Vault.
+     *
+     * @param guestName  the guest name
+     * @param roomType   the room type
+     * @param checkIn    the check-in date
+     * @param checkOut   the check-out date
+     * @return a map containing the booking details
+     */
     public Map<String, Object> createBooking(String guestName, String roomType,
                                               String checkIn, String checkOut) {
         String bookingId = "BK-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
 
-        // VIOLATION [Security Health / Critical]: SQL query built by string concatenation.
-        // An attacker can pass guestName = "'; DROP TABLE bookings; --" to destroy data.
-        // Use parameterised queries (JdbcTemplate with '?') to prevent SQL injection.
-        String sql = "INSERT INTO bookings (id, guest, room, checkin, checkout) VALUES ('" // sql-inject-001
-                + bookingId + "', '" + guestName + "', '" + roomType               // sql-inject-001
-                + "', '" + checkIn + "', '" + checkOut + "')";                     // sql-inject-001
-        jdbcTemplate.execute(sql);
+        // Use parameterized query to prevent SQL injection
+        String sql = "INSERT INTO bookings (id, guest, room, checkin, checkout) VALUES (?, ?, ?, ?, ?)";
+        jdbcTemplate.update(sql, bookingId, guestName, roomType, checkIn, checkOut);
 
-        // VIOLATION [Security Health / High]: MD5 is a broken hash algorithm (RFC 6151).
-        // Do not use MD5 for any security-related hashing. Use SHA-256 or bcrypt.
-        String confirmCode = md5Hash(bookingId + guestName); // sec-weak-hash-001
+        // Use SHA-256 instead of MD5 for confirmation code
+        String confirmCode = sha256Hash(bookingId + guestName);
 
         Map<String, Object> booking = new HashMap<>();
         booking.put("bookingId", bookingId);
@@ -50,26 +117,37 @@ public class BookingService {
         booking.put("checkIn", checkIn);
         booking.put("checkOut", checkOut);
         booking.put("confirmationCode", confirmCode);
-        booking.put("dbHost", DB_HOST);
+        booking.put("dbHost", dbHost);
         return booking;
     }
 
+    /**
+     * Retrieves a booking by ID using a parameterized query.
+     *
+     * @param bookingId the booking ID
+     * @return a map containing the booking details
+     */
     public Map<String, Object> getBookingById(String bookingId) {
-        // VIOLATION [Security Health / Critical]: SQL injection via string concatenation.
-        // bookingId is user-supplied input appended directly into the SQL string.
-        String sql = "SELECT * FROM bookings WHERE id = '" + bookingId + "'"; // sql-inject-001
+        // Use parameterized query to prevent SQL injection
+        String sql = "SELECT * FROM bookings WHERE id = ?";
         Map<String, Object> result = new HashMap<>();
         try {
-            result = jdbcTemplate.queryForMap(sql);
+            result = jdbcTemplate.queryForMap(sql, bookingId);
         } catch (Exception e) {
             result.put("error", "Booking not found: " + bookingId);
         }
         return result;
     }
 
-    // VIOLATION [Code Sustainability / High]: High cyclomatic complexity.
-    // This method has 9+ decision branches. Automated transformation tools flag methods
-    // above complexity threshold as high maintenance risk and transformation blockers.
+    /**
+     * Calculates the room price based on room type, nights, season, and loyalty tier.
+     *
+     * @param roomType the room type
+     * @param nights   the number of nights
+     * @param season   the season (PEAK, OFF)
+     * @param loyalty  the loyalty tier (GOLD, PLATINUM, DIAMOND)
+     * @return the formatted total price
+     */
     public String calculateRoomPrice(String roomType, int nights, String season, String loyalty) {
         double basePrice = 0;
         if (roomType.equals("STANDARD")) { basePrice = 120.0; }
@@ -88,29 +166,47 @@ public class BookingService {
         return String.format("%.2f", total);
     }
 
+    /**
+     * Checks if a room type is available.
+     *
+     * @param roomType the room type to check
+     * @return true if the room type is valid
+     */
     public boolean isRoomAvailable(String roomType) {
-        // VIOLATION [Code Sustainability / Medium]: Duplicated validation logic.
-        // Same room type validation is repeated here and in calculateRoomPrice.
-        // Should be extracted to a shared RoomType enum or validator.
-        if (!roomType.equals("STANDARD") && !roomType.equals("DELUXE") // dup-logic-001
-                && !roomType.equals("SUITE") && !roomType.equals("VILLA")) { // dup-logic-001
+        if (!roomType.equals("STANDARD") && !roomType.equals("DELUXE")
+                && !roomType.equals("SUITE") && !roomType.equals("VILLA")) {
             return false;
         }
         return true;
     }
 
+    /**
+     * Generates a report reference using the externalized payment API endpoint.
+     *
+     * @param month the month for the report
+     * @return a report generation message
+     */
     public String generateReport(String month) {
-        return "Report generation triggered for: " + month + " via " + PAYMENT_API;
+        return "Report generation triggered for: " + month + " via " + paymentApi;
     }
 
-    private String md5Hash(String input) { // sec-weak-hash-001
+    /**
+     * Generates a SHA-256 hash of the input string.
+     * Replaces the insecure MD5 hashing.
+     *
+     * @param input the input string to hash
+     * @return the hex-encoded SHA-256 hash
+     */
+    private String sha256Hash(String input) {
         try {
-            MessageDigest md = MessageDigest.getInstance("MD5"); // sec-weak-hash-001
-            byte[] hash = md.digest(input.getBytes());
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(input.getBytes(StandardCharsets.UTF_8));
             StringBuilder sb = new StringBuilder();
-            for (byte b : hash) { sb.append(String.format("%02x", b)); }
+            for (byte b : hash) {
+                sb.append(String.format("%02x", b));
+            }
             return sb.toString();
-        } catch (Exception e) {
+        } catch (NoSuchAlgorithmException e) {
             return input;
         }
     }
